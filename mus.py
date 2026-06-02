@@ -111,11 +111,14 @@ pygame.mixer.init()
 # ─────────────────────────────────────────────
 #  STATE
 # ─────────────────────────────────────────────
-playlist     = Playlist()
-current_song = ""
-paused       = False
-is_playing   = False
-CONFIG_FILE  = "music_player_config.json"
+playlist      = Playlist()
+current_song  = ""
+paused        = False
+is_playing    = False
+CONFIG_FILE   = "music_player_config.json"
+song_duration = 0       # detik (float)
+seek_offset   = 0.0     # detik, saat terakhir seek dilakukan
+seek_time_ms  = 0       # pygame.get_ticks() saat seek
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -171,7 +174,7 @@ def update_now_playing():
         return
 
     name = os.path.splitext(current_song)[0]
-    
+
     artist = ""
     title = ""
     try:
@@ -187,7 +190,7 @@ def update_now_playing():
             if not title and '\xa9nam' in audio.tags: title = str(audio.tags['\xa9nam'][0])
     except Exception:
         pass
-        
+
     if not title:
         if " - " in name:
             artist_split, title_split = name.split(" - ", 1)
@@ -196,7 +199,7 @@ def update_now_playing():
                 artist = artist_split
         else:
             title = name
-            
+
     if not artist:
         artist = "Unknown Artist"
 
@@ -254,6 +257,62 @@ def load_songs_from_directory(directory):
 # ─────────────────────────────────────────────
 #  AUTO-PLAY NEXT  (polling ringan, 1 detik)
 # ─────────────────────────────────────────────
+def get_song_duration(path):
+    """Kembalikan durasi lagu dalam detik, 0 jika gagal."""
+    try:
+        audio = MutagenFile(path)
+        if audio and audio.info:
+            return audio.info.length
+    except Exception:
+        pass
+    return 0
+
+def fmt_time(secs):
+    """Format detik → MM:SS"""
+    secs = max(0, int(secs))
+    return f"{secs // 60:02d}:{secs % 60:02d}"
+
+def update_progress_bar():
+    global seek_offset, seek_time_ms
+    if is_playing and song_duration > 0:
+        elapsed = seek_offset + (pygame.mixer.music.get_pos() / 1000.0)
+        elapsed = min(elapsed, song_duration)
+        ratio   = elapsed / song_duration
+
+        bar_w = progress_canvas.winfo_width()
+        fill_w = int(bar_w * ratio)
+
+        progress_canvas.coords("fill",  0, 0, fill_w, 10)
+        progress_canvas.coords("knob",  fill_w - 5, -1, fill_w + 5, 11)
+        lbl_time_cur.config(text=fmt_time(elapsed))
+        lbl_time_tot.config(text=fmt_time(song_duration))
+    elif paused and song_duration > 0:
+        pass   # biarkan posisi terakhir
+    else:
+        progress_canvas.coords("fill",  0, 0, 0, 10)
+        progress_canvas.coords("knob",  -10, -1, 0, 11)
+        lbl_time_cur.config(text="00:00")
+        lbl_time_tot.config(text=fmt_time(song_duration))
+    root.after(500, update_progress_bar)
+
+def on_progress_click(event):
+    """Seek ke posisi yang diklik pada progress bar."""
+    global seek_offset, seek_time_ms
+    if not current_song or song_duration <= 0:
+        return
+    bar_w = progress_canvas.winfo_width()
+    ratio = max(0.0, min(1.0, event.x / bar_w))
+    target_sec = ratio * song_duration
+    seek_offset = target_sec
+    seek_time_ms = pygame.time.get_ticks()
+    if is_playing or paused:
+        try:
+            pygame.mixer.music.play(start=target_sec)
+            if paused:
+                pygame.mixer.music.pause()
+        except Exception as e:
+            print(f"Seek error: {e}")
+
 def check_song_end():
     global current_song, paused, is_playing
     if is_playing and not pygame.mixer.music.get_busy():
@@ -279,7 +338,7 @@ def load_music():
             save_config(directory)
 
 def play_music():
-    global current_song, paused, is_playing
+    global current_song, paused, is_playing, song_duration, seek_offset, seek_time_ms
     if not current_song:
         return
     if paused:
@@ -289,10 +348,15 @@ def play_music():
         update_now_playing()
         return
     try:
-        pygame.mixer.music.load(os.path.join(root.directory, current_song))
+        path = os.path.join(root.directory, current_song)
+        pygame.mixer.music.load(path)
         pygame.mixer.music.play()
         is_playing = True
         paused = False
+        seek_offset = 0.0
+        seek_time_ms = pygame.time.get_ticks()
+        song_duration = get_song_duration(path)
+        lbl_time_tot.config(text=fmt_time(song_duration))
         update_now_playing()
     except AttributeError:
         print("❌ Belum ada folder!")
@@ -314,10 +378,11 @@ def toggle_play():
         play_music()
 
 def stop_music():
-    global paused, is_playing
+    global paused, is_playing, seek_offset
     pygame.mixer.music.stop()
     paused = False
     is_playing = False
+    seek_offset = 0.0
     update_now_playing()
 
 def next_music():
@@ -458,18 +523,42 @@ bottom.pack(fill="x", side="bottom")
 
 tk.Frame(bottom, bg=ACCENT, height=2).pack(fill="x")
 
+# ── PROGRESS BAR ──────────────────────────────
+progress_row = tk.Frame(bottom, bg=BG_CARD)
+progress_row.pack(fill="x", padx=18, pady=(10, 2))
+
+lbl_time_cur = tk.Label(progress_row, text="00:00",
+                         font=("Segoe UI", 8), bg=BG_CARD, fg=TEXT_SEC, width=5)
+lbl_time_cur.pack(side="left")
+
+progress_canvas = tk.Canvas(progress_row, height=10,
+                              bg="#2a2a40", highlightthickness=0, cursor="hand2")
+progress_canvas.pack(side="left", fill="x", expand=True, padx=8)
+
+lbl_time_tot = tk.Label(progress_row, text="00:00",
+                         font=("Segoe UI", 8), bg=BG_CARD, fg=TEXT_SEC, width=5)
+lbl_time_tot.pack(side="left")
+
+# Buat elemen progress bar (fill + knob)
+progress_canvas.create_rectangle(0, 3, 0, 7,
+                                   fill=ACCENT2, outline="", tags="fill")
+progress_canvas.create_oval(-10, -1, 0, 11,
+                              fill=ACCENT, outline=ACCENT2, width=1, tags="knob")
+
+progress_canvas.bind("<Button-1>",       on_progress_click)
+progress_canvas.bind("<B1-Motion>",      on_progress_click)
+
+# ── TRANSPORT BUTTONS ─────────────────────────
 ctrl_row = tk.Frame(bottom, bg=BG_CARD)
-ctrl_row.pack(pady=14)
+ctrl_row.pack(pady=(4, 14))
 
 btn_prev = make_btn(ctrl_row, "⏮", prev_music, BG_SURFACE, 14, 3, 6)
 btn_play = make_btn(ctrl_row, "▶", toggle_play, ACCENT,    22, 4, 8)
 btn_next = make_btn(ctrl_row, "⏭", next_music, BG_SURFACE, 14, 3, 6)
-btn_stop = make_btn(ctrl_row, "⏹", stop_music, DANGER,     14, 3, 6)
 
 btn_prev.pack(side="left", padx=6)
 btn_play.pack(side="left", padx=6)
 btn_next.pack(side="left", padx=6)
-btn_stop.pack(side="left", padx=6)
 
 # ─────────────────────────────────────────────
 #  STARTUP
@@ -482,5 +571,6 @@ else:
     print("📂 Pilih folder via '＋ Open Folder'.")
 
 root.after(1000, check_song_end)
+root.after(500,  update_progress_bar)
 
 root.mainloop()
