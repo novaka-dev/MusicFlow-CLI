@@ -95,6 +95,41 @@ class Playlist:
             idx += 1
         return -1
 
+    def delete_song(self, song_title):
+        """Hapus node dari doubly linked list. Return node pengganti jika current dihapus."""
+        node = self.head
+        while node:
+            if node.song_title == song_title:
+                # Tentukan pengganti jika node ini adalah current
+                replacement = None
+                if node == self.current:
+                    replacement = node.next if node.next else node.prev
+
+                # Putuskan sambungan node (inti operasi DLL)
+                if node.prev:
+                    node.prev.next = node.next   # sambungkan prev → next
+                else:
+                    self.head = node.next        # hapus head, geser head
+
+                if node.next:
+                    node.next.prev = node.prev   # sambungkan next → prev
+                else:
+                    self.tail = node.prev        # hapus tail, geser tail
+
+                # Bersihkan pointer node terhapus
+                node.prev = None
+                node.next = None
+
+                self.size -= 1
+
+                # Update current jika node yang dihapus adalah current
+                if node == self.current:
+                    self.current = replacement
+
+                return replacement
+            node = node.next
+        return None
+
 # ─────────────────────────────────────────────
 #  ROOT WINDOW
 # ─────────────────────────────────────────────
@@ -119,18 +154,28 @@ CONFIG_FILE   = "music_player_config.json"
 song_duration = 0       # detik (float)
 seek_offset   = 0.0     # detik, saat terakhir seek dilakukan
 seek_time_ms  = 0       # pygame.get_ticks() saat seek
+deleted_songs = set()   # simpan nama file yang dihapus
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
 def save_config(directory):
     with open(CONFIG_FILE, "w") as f:
-        json.dump({"last_directory": directory}, f)
+        json.dump({
+            "last_directory": directory,
+            "deleted_songs": list(deleted_songs)
+        }, f)
 
 def load_config():
+    global deleted_songs
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            return json.load(f).get("last_directory", "")
+        try:
+            with open(CONFIG_FILE) as f:
+                data = json.load(f)
+                deleted_songs = set(data.get("deleted_songs", []))
+                return data.get("last_directory", "")
+        except:
+            pass
     return ""
 
 # ─────────────────────────────────────────────
@@ -242,7 +287,7 @@ def load_songs_from_directory(directory):
     playlist.clear()
     audio_ext = {".mp3", ".wav", ".ogg", ".m4a", ".flac"}
     for f in sorted(os.listdir(directory)):
-        if os.path.splitext(f)[1].lower() in audio_ext:
+        if f not in deleted_songs and os.path.splitext(f)[1].lower() in audio_ext:
             playlist.add_song(f)
     refresh_playlist_box()
     if playlist.size > 0:
@@ -332,8 +377,11 @@ def check_song_end():
 #  CONTROLS
 # ─────────────────────────────────────────────
 def load_music():
+    global deleted_songs
     directory = filedialog.askdirectory()
     if directory:
+        # Reset daftar lagu yang dihapus kalau user sengaja buka folder lagi
+        deleted_songs.clear()
         if load_songs_from_directory(directory):
             save_config(directory)
 
@@ -422,6 +470,63 @@ def on_song_select(event):
 def on_song_double(event):
     on_song_select(event)
     play_music()
+
+# ─────────────────────────────────────────────
+#  DELETE SONG (klik kanan → context menu)
+# ─────────────────────────────────────────────
+def delete_selected_song():
+    global current_song, paused, is_playing
+    try:
+        idx = songlist.curselection()[0]
+    except IndexError:
+        return
+
+    songs = playlist.get_all_songs()
+    if idx >= len(songs):
+        return
+
+    song_to_delete = songs[idx]
+    is_current = (song_to_delete == current_song)
+
+    # Jika lagu yang dihapus sedang diputar → stop dulu
+    if is_current and (is_playing or paused):
+        pygame.mixer.music.stop()
+        is_playing = False
+        paused = False
+
+    # Hapus node dari DLL
+    replacement_node = playlist.delete_song(song_to_delete)
+
+    # Update current_song setelah delete
+    if is_current:
+        if replacement_node:
+            current_song = replacement_node.song_title
+        else:
+            current_song = ""
+
+    # Update UI
+    lbl_count.config(text=f"{playlist.size} songs")
+    refresh_playlist_box()
+    update_now_playing()
+
+    # Simpan status terhapus ke config
+    deleted_songs.add(song_to_delete)
+    if hasattr(root, 'directory'):
+        save_config(root.directory)
+
+    print(f"🗑  Dihapus dari DLL & disembunyikan permanen: {song_to_delete}")
+
+def show_context_menu(event):
+    """Tampilkan context menu saat klik kanan di songlist."""
+    # Pilih item yang diklik kanan
+    idx = songlist.nearest(event.y)
+    if idx >= 0 and idx < songlist.size():
+        songlist.selection_clear(0, tk.END)
+        songlist.selection_set(idx)
+        songlist.activate(idx)
+        on_song_select(event)
+        context_menu.tk_popup(event.x_root, event.y_root)
+    context_menu.grab_release()
 
 # ─────────────────────────────────────────────
 #  BUTTON FACTORY
@@ -516,6 +621,16 @@ songlist.pack(fill="both", expand=True)
 
 songlist.bind("<<ListboxSelect>>", on_song_select)
 songlist.bind("<Double-Button-1>",  on_song_double)
+songlist.bind("<Button-3>",         show_context_menu)
+
+# ── CONTEXT MENU ──────────────────────────────
+context_menu = tk.Menu(root, tearoff=0,
+                        bg=BG_SURFACE, fg=TEXT_PRI,
+                        activebackground=DANGER,
+                        activeforeground=TEXT_PRI,
+                        font=("Segoe UI", 10),
+                        relief="flat", bd=0)
+context_menu.add_command(label="🗑  Delete Song", command=delete_selected_song)
 
 # ── BOTTOM CONTROLS ──────────────────────────
 bottom = tk.Frame(root, bg=BG_CARD)
